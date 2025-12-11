@@ -60,7 +60,6 @@ async function scanFast(port) {
       (async () => {
         let found = false;
 
-        console.log(ip, port);
         const ok = await checkPort(ip, port);
 
         if (ok) found = true;
