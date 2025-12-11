@@ -2,7 +2,7 @@ const WebSocket = require("ws");
 const net = require("net");
 const { randomUUID } = require("crypto");
 const tools = require("./socket-tools");
-const discoverRFIDWithMac = require("./socket-ping");
+const scanFast = require("./socket-ping");
 
 const PORT = 9989;
 
@@ -38,17 +38,19 @@ wsServer.on("connection", (ws) => {
         ws.send(tools.getParams({ type: "data", data: data }));
       });
 
+      // 关闭
       socketServer[ws.uuid].on("close", () => {
         ws.close();
       });
 
       ws.on("close", () => {
+        console.log("--Ws Close--");
         socketServer[ws.uuid].destroy();
         delete socketServer[ws.uuid];
       });
     } else if (info.action === "ports") {
       // 获取有那些网络设备
-      const devices = await discoverRFIDWithMac();
+      const devices = await scanFast(info.port);
       ws.send(tools.getParams({ type: "ports", data: devices }));
     } else if (info.action === "send") {
       // 发送消息
