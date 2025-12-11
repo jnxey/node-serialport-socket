@@ -6,10 +6,10 @@ const scanFast = require("./socket-ping");
 
 const PORT = 9989;
 
-const wsServer = new WebSocket.Server({
-  port: PORT,
-  verifyClient: (info, done) => done(true),
-});
+const wsServer = new WebSocket.Server(
+  { port: PORT, verifyClient: (info, done) => done(true) },
+  () => console.log(`WebSocket Open: ws://localhost:${PORT}`),
+);
 
 const socketServer = {};
 
