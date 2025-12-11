@@ -64,3 +64,12 @@ wsServer.on("connection", (ws) => {
     }
   });
 });
+
+// 捕获所有未处理异常 → 不退出
+process.on("uncaughtException", (err) => {
+  console.error("未捕获异常:", err);
+});
+
+process.on("unhandledRejection", (reason) => {
+  console.error("未处理 Promise Rejection:", reason);
+});
