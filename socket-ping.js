@@ -4,12 +4,18 @@ const { exec } = require("child_process");
 
 const timeout = 100; // 极短超时，极速扫描
 
-// 获取本机局域网子网前缀，例如 "192.168.1"
+// 获取本机局域网子网前缀，例如 "192.168.101 -> 192.168.255"
 function getLocalSubnet() {
   const nets = os.networkInterfaces();
   for (const iface of Object.values(nets)) {
     for (const net of iface) {
-      if (net.family === "IPv4" && !net.internal) {
+      console.log(net.address)
+      const mark = Number(net.address.split('.')[2])
+      if (
+        net.family === 'IPv4' &&
+        !net.internal &&
+        mark >= 100
+      ) {
         return net.address.split(".").slice(0, 3).join(".");
       }
     }
