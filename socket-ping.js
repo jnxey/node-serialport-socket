@@ -9,12 +9,11 @@ function getLocalSubnet() {
   const nets = os.networkInterfaces();
   for (const iface of Object.values(nets)) {
     for (const net of iface) {
-      console.log(net.address)
       const mark = Number(net.address.split('.')[2])
       if (
         net.family === 'IPv4' &&
         !net.internal &&
-        mark >= 100
+        mark === 10
       ) {
         return net.address.split(".").slice(0, 3).join(".");
       }
