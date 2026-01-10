@@ -9,7 +9,11 @@ function getLocalSubnet() {
   const nets = os.networkInterfaces();
   for (const iface of Object.values(nets)) {
     for (const net of iface) {
-      if (net.family === "IPv4" && !net.internal) {
+      if (
+        net.family === "IPv4" &&
+        !net.internal &&
+        net.address.startsWith("192.168.")
+      ) {
         return net.address.split(".").slice(0, 3).join(".");
       }
     }
