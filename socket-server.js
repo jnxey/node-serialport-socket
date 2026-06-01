@@ -85,8 +85,8 @@ const CERT_DIR = path.join(__dirname, "certs");
  * TLS 证书与私钥路径
  * 可通过环境变量覆盖，便于部署时挂载正式证书
  */
-const CERT_PATH = process.env.WSS_CERT || path.join(CERT_DIR, "cert.pem");
-const KEY_PATH = process.env.WSS_KEY || path.join(CERT_DIR, "key.pem");
+const CERT_PATH = process.env.WSS_CERT || path.join(CERT_DIR, "localhost.pem");
+const KEY_PATH = process.env.WSS_KEY || path.join(CERT_DIR, "localhost-key.pem");
 
 // ---------------------------------------------------------------------------
 // 运行时状态
