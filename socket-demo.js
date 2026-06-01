@@ -1,35 +1,36 @@
-const net = require("net");
+/**
+ * RFID 直连示例（不经过 WebSocket 桥接）
+ *
+ * 用法：修改 HOST / PORT 后执行 node socket-demo.js
+ * 用于验证网关 TCP 与读卡指令是否正常。
+ */
 
-const HOST = "192.168.1.8"; // 串口服务器 IP
-const PORT = 8899; // 串口映射端口
+const net = require("net");
+const { byteToHex } = require("./socket-tools");
+
+const HOST = "192.168.1.8"; // 串口/RFID 网关 IP
+const PORT = 8899; // 网关映射的 TCP 端口
 
 const client = new net.Socket();
 
-client.connect(PORT, HOST, function () {
-  console.log("已连接RFID设备");
+client.connect(PORT, HOST, () => {
+  console.log("已连接 RFID 设备");
 
-  // 示例命令（必须是Buffer）
+  // 示例读卡指令（具体帧格式以设备协议为准）
   const cmd = Buffer.from([
-    0xdd, 0x11, 0xef, 0x09, 0x01, 0x01, 0x01, 0x7d, 0x5,
+    0xdd, 0x11, 0xef, 0x09, 0x01, 0x01, 0x01, 0x7d, 0x05,
   ]);
   client.write(cmd);
 });
 
-// 接收数据
 client.on("data", (data) => {
-  const result = [];
-  data.forEach((item) => {
-    result.push(Number(item).toString(16).padStart(2, "0"));
-  });
-  console.log("收到RFID数据:", result.join(" "));
+  console.log("收到 RFID 数据:", byteToHex(data).join(" "));
 });
 
-// 出错
 client.on("error", (err) => {
-  console.error("Socket错误:", err);
+  console.error("Socket 错误:", err);
 });
 
-// 断开
 client.on("close", () => {
   console.log("连接关闭");
 });
