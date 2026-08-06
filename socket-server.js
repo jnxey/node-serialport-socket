@@ -23,8 +23,9 @@
  * --------------------------------------------------------------------------
  *
  * 1. 扫描局域网设备
- *    { "action": "ports", "port": 8899 }
+ *    { "action": "ports", "port": 8899, "subnet": 10 }
  *    - port：要探测的 TCP 端口（RFID/串口网关映射端口，常见 8899）
+ *    - subnet：网段第三段，如 10 表示 192.168.10.x；省略时默认 10
  *
  * 2. 连接指定设备
  *    { "action": "open", "rIP": "192.168.1.8_8899" }
@@ -262,7 +263,7 @@ async function handleMessage(ws, message) {
       if (!Number.isFinite(port)) {
         return send(ws, { type: "error", msg: "invalid port" });
       }
-      const devices = await scanFast(port);
+      const devices = await scanFast(port, info.subnet);
       send(ws, { type: "ports", data: devices });
       break;
     }

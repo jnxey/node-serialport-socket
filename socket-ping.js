@@ -6,7 +6,6 @@
  */
 
 const net = require("net");
-const os = require("os");
 const { exec } = require("child_process");
 
 /** 单 IP 探测超时（毫秒），越小扫描越快，但易漏检 */
@@ -15,19 +14,15 @@ const SCAN_TIMEOUT_MS = 100;
 const SCAN_CONCURRENCY = 64;
 
 /**
- * 取本机第一个非回环 IPv4 的 /24 前缀（如 192.168.101.10 → 192.168.101）
+ * 构建扫描网段前缀（192.168.{thirdOctet}）
+ * @param {number|string|undefined|null} thirdOctet - 网段第三段，空时默认 10
  */
-function getLocalSubnet() {
-  const nets = os.networkInterfaces();
-  for (const iface of Object.values(nets)) {
-    for (const addr of iface) {
-      if (addr.family !== "IPv4" || addr.internal) continue;
-      const parts = addr.address.split(".");
-      if (parts.length !== 4) continue;
-      return parts.slice(0, 3).join(".");
-    }
-  }
-  throw new Error("未找到可用于扫描的 IPv4 网卡");
+function getLocalSubnet(thirdOctet) {
+  const segment =
+    thirdOctet === undefined || thirdOctet === null || thirdOctet === ""
+      ? 10
+      : Number(thirdOctet);
+  return `192.168.${segment}`;
 }
 
 /** 检测目标 IP:port 是否有 TCP 服务监听 */
@@ -80,13 +75,14 @@ async function mapWithConcurrency(items, limit, fn) {
 /**
  * 扫描当前网段内开放 port 的设备
  * @param {number} port - RFID/串口网关 TCP 端口
+ * @param {number|string|undefined|null} [subnet] - 网段第三段，空时默认 10
  * @returns {Promise<Array<{ ip: string, mac: string|null, port: number }>>}
  */
-async function scanFast(port) {
-  const subnet = getLocalSubnet();
-  console.log("📡 扫描网段:", subnet + ".x", "端口:", port);
+async function scanFast(port, subnet) {
+  const subnetPrefix = getLocalSubnet(subnet);
+  console.log("📡 扫描网段:", subnetPrefix + ".x", "端口:", port);
 
-  const ips = Array.from({ length: 254 }, (_, i) => `${subnet}.${i + 1}`);
+  const ips = Array.from({ length: 254 }, (_, i) => `${subnetPrefix}.${i + 1}`);
 
   const found = await mapWithConcurrency(ips, SCAN_CONCURRENCY, async (ip) => {
     if (!(await checkPort(ip, port))) return null;
