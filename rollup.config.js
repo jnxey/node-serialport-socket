@@ -39,6 +39,6 @@ export default {
       ],
     }),
     // 生产环境代码压缩
-    terser(),
+    // terser(),
   ],
 };
