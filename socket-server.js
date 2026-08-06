@@ -4,15 +4,19 @@
  * ============================================================================
  *
  * 【作用】
- * 本进程作为「中间层」：前端（浏览器 / Electron）无法直接访问局域网 TCP，
- * 因此通过加密的 WebSocket（WSS）与本服务通信；本服务再与 RFID 网关建立
- * 原生 TCP Socket，实现扫描、连接、收发指令。
+ * 本进程作为「中间层」：前端（浏览器 / Electron）无法直接访问局域网 TCP 或串口，
+ * 因此通过加密的 WebSocket（WSS）与本服务通信；本服务再与 RFID 设备建立
+ * TCP 或串口连接，实现扫描、连接、收发指令。
  *
  * 【典型拓扑】
  *
- *   前端客户端  <--WSS-->  socket-server.js  <--TCP-->  RFID 网关 (如 8899)
+ *   前端客户端  <--WSS-->  socket-server.js  <--TCP-->  网口 RFID 网关 (如 8899)
  *                              |
- *                         socket-ping.js（扫描时）
+ *                         socket-ping.js（网口扫描）
+ *                              |
+ *                         socket-serial.js（串口列举/连接）
+ *                              |
+ *                         串口 RFID (COMx)
  *
  * 【为何使用 WSS】
  * 浏览器/Electron 页面在 HTTPS 或安全上下文中只能连接 wss://，不能使用 ws://。
@@ -35,7 +39,17 @@
  * 3. 向已连接设备发送数据
  *    { "action": "send", "data": [221, 17, 239, ...] }
  *    - data：字节数组（十进制 0–255），对应 RFID 协议帧
- *    - 须先 open 成功，否则返回 error
+ *    - 须先 open 或 open-serial 成功，否则返回 error
+ *
+ * 4. 列举串口
+ *    { "action": "serial-ports" }
+ *
+ * 5. 连接串口 RFID
+ *    { "action": "open-serial", "path": "COM3", "baudRate": 115200,
+ *      "dataBits": 8, "stopBits": 1, "parity": "none" }
+ *    - path：串口路径（Windows 如 COM3，Linux 如 /dev/ttyUSB0）
+ *    - baudRate / dataBits / stopBits / parity：完整串口参数
+ *    - 同一 WebSocket 会话重复 open / open-serial 会先断开旧连接
  *
  * --------------------------------------------------------------------------
  * 下行消息（服务端 → 客户端，JSON 字符串）
@@ -43,8 +57,9 @@
  *
  * | type          | 含义           | 字段说明
  * |---------------|----------------|------------------------------------------
- * | ports         | 扫描结果       | data: [{ ip, mac, port }, ...]
- * | open-success  | TCP 连接成功   | 无额外字段，可开始 send
+ * | ports         | 网口扫描结果   | data: [{ ip, mac, port }, ...]
+ * | serial-ports  | 串口列表       | data: [{ path, manufacturer, ... }, ...]
+ * | open-success  | 设备连接成功   | 无额外字段，可开始 send
  * | data          | 设备上报数据   | data: Buffer 序列化后的字节（见 tools）
  * | error         | 错误           | msg: 错误描述
  *
@@ -71,6 +86,11 @@ const { randomUUID } = require("crypto");
 const selfsigned = require("selfsigned");
 const tools = require("./socket-tools");
 const scanFast = require("./socket-ping");
+const {
+  listSerialPorts,
+  parseSerialConfig,
+  openSerialPort,
+} = require("./socket-serial");
 
 // ---------------------------------------------------------------------------
 // 配置常量
@@ -94,14 +114,14 @@ const KEY_PATH = process.env.WSS_KEY || path.join(CERT_DIR, "localhost-key.pem")
 // ---------------------------------------------------------------------------
 
 /**
- * 设备 TCP 连接表
+ * 设备连接表（TCP 或 Serial）
  * 键：ws.uuid（每个 WebSocket 连接唯一 ID）
- * 值：net.Socket（与 RFID 网关的 TCP 连接）
+ * 值：{ kind: "tcp"|"serial", handle: net.Socket|SerialPort }
  *
- * 约束：一个 WebSocket 会话同时只维护一条设备 TCP；
- *       断开 WebSocket 或重新 open 时会清理对应条目。
+ * 约束：一个 WebSocket 会话同时只维护一条设备连接；
+ *       断开 WebSocket 或重新 open / open-serial 时会清理对应条目。
  */
-const deviceSockets = {};
+const deviceConnections = {};
 
 // ---------------------------------------------------------------------------
 // 工具函数
@@ -140,67 +160,88 @@ function send(ws, payload) {
 }
 
 /**
- * 关闭并清理当前 WebSocket 会话关联的 RFID 设备 TCP 连接
- *
- * - 移除 Socket 上所有监听器，防止 close/error 重复触发
- * - destroy() 立即释放底层连接
- * - 从 deviceSockets 删除映射
+ * 关闭并清理当前 WebSocket 会话关联的设备连接
  *
  * @param {import("ws") & { uuid: string }} ws
  */
 function closeDevice(ws) {
-  const sock = deviceSockets[ws.uuid];
-  if (!sock) return;
-  sock.removeAllListeners();
-  sock.destroy();
-  delete deviceSockets[ws.uuid];
+  const conn = deviceConnections[ws.uuid];
+  if (!conn) return;
+
+  const { kind, handle } = conn;
+  handle.removeAllListeners();
+
+  if (kind === "tcp") {
+    handle.destroy();
+  } else {
+    handle.close();
+  }
+
+  delete deviceConnections[ws.uuid];
+}
+
+/**
+ * 绑定设备 IO：data 上行、close/error 清理
+ *
+ * @param {import("ws") & { uuid: string }} ws
+ * @param {import("net").Socket | import("@serialport/stream").SerialPort} handle
+ * @param {string} label - 日志用连接标识
+ */
+function attachDeviceIO(ws, handle, label) {
+  handle.on("data", (data) => {
+    send(ws, { type: "data", data });
+  });
+
+  handle.on("close", () => {
+    closeDevice(ws);
+    ws.close();
+  });
+
+  handle.on("error", (err) => {
+    console.error(`设备连接错误 ${label}`, err.message);
+    send(ws, { type: "error", msg: err.message });
+    closeDevice(ws);
+  });
 }
 
 /**
  * 建立到 RFID 网关的 TCP 连接，并配置双向数据转发
- *
- * 流程：
- * 1. 若已有连接则先 closeDevice（支持切换设备）
- * 2. 创建 net.Socket 并注册 connect / data / close / error
- * 3. connect 成功 → 通知客户端 open-success
- * 4. 收到设备数据 → 封装为 { type: "data", data } 转发给 WebSocket
- * 5. 设备 TCP 断开 → 关闭 WebSocket（客户端可重连）
- * 6. TCP 出错 → 下发 error 并清理连接
  *
  * @param {import("ws") & { uuid: string }} ws
  * @param {string} ip   - 网关 IP
  * @param {number} port - 网关 TCP 端口
  */
 function connectDevice(ws, ip, port) {
-  // 重连前先释放旧 Socket，避免泄漏与重复监听
   closeDevice(ws);
 
   const sock = new net.Socket();
-  deviceSockets[ws.uuid] = sock;
+  deviceConnections[ws.uuid] = { kind: "tcp", handle: sock };
 
   sock.on("connect", () => {
     console.log(`设备已连接 ${ip}:${port} (${ws.uuid})`);
     send(ws, { type: "open-success" });
   });
 
-  // 设备 → 服务端 → WebSocket → 前端展示/解析 RFID 帧
-  sock.on("data", (data) => {
-    send(ws, { type: "data", data });
-  });
-
-  // 网关主动断开或网络中断：清理 TCP 并关闭 WebSocket
-  sock.on("close", () => {
-    closeDevice(ws);
-    ws.close();
-  });
-
-  sock.on("error", (err) => {
-    console.error(`设备连接错误 ${ip}:${port}`, err.message);
-    send(ws, { type: "error", msg: err.message });
-    closeDevice(ws);
-  });
-
+  attachDeviceIO(ws, sock, `${ip}:${port}`);
   sock.connect(port, ip);
+}
+
+/**
+ * 打开串口 RFID 设备并配置双向数据转发
+ *
+ * @param {import("ws") & { uuid: string }} ws
+ * @param {{ path: string, baudRate: number, dataBits: number, stopBits: number, parity: string }} config
+ */
+async function connectSerialDevice(ws, config) {
+  closeDevice(ws);
+
+  const { path } = config;
+  const port = await openSerialPort(config);
+  deviceConnections[ws.uuid] = { kind: "serial", handle: port };
+  attachDeviceIO(ws, port, path);
+
+  console.log(`串口已连接 ${path} (${ws.uuid})`);
+  send(ws, { type: "open-success" });
 }
 
 // ---------------------------------------------------------------------------
@@ -278,13 +319,30 @@ async function handleMessage(ws, message) {
       break;
     }
 
-    // 下发：将字节数组写入已连接的设备 Socket
+    // 下发：将字节数组写入已连接的设备（TCP 或 Serial）
     case "send": {
-      const sock = deviceSockets[ws.uuid];
-      if (!sock) {
+      const conn = deviceConnections[ws.uuid];
+      if (!conn) {
         return send(ws, { type: "error", msg: "Not Found Device" });
       }
-      sock.write(Buffer.from(info.data));
+      conn.handle.write(Buffer.from(info.data));
+      break;
+    }
+
+    // 列举本机串口
+    case "serial-ports": {
+      const ports = await listSerialPorts();
+      send(ws, { type: "serial-ports", data: ports });
+      break;
+    }
+
+    // 连接串口 RFID
+    case "open-serial": {
+      const config = parseSerialConfig(info);
+      if (!config) {
+        return send(ws, { type: "error", msg: "invalid serial config" });
+      }
+      await connectSerialDevice(ws, config);
       break;
     }
     default:
@@ -315,7 +373,7 @@ async function start() {
   });
 
   wsServer.on("connection", (ws) => {
-    // 为每个前端连接生成唯一 ID，作为 deviceSockets 的键
+    // 为每个前端连接生成唯一 ID，作为 deviceConnections 的键
     ws.uuid = randomUUID();
     console.log("WebSocket 新连接:", ws.uuid);
 
@@ -326,7 +384,7 @@ async function start() {
       });
     });
 
-    // 前端关闭或刷新页面：同步释放 RFID TCP，避免网关侧连接残留
+    // 前端关闭或刷新页面：同步释放设备连接，避免残留
     ws.on("close", () => {
       console.log("WebSocket 断开:", ws.uuid);
       closeDevice(ws);
